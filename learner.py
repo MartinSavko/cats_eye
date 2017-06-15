@@ -81,7 +81,6 @@ def main():
     parser.add_option('-N', '--nnegative', default=30, type=int, help='number of negative clicks for each configuration')
     parser.add_option('-I', '--nmindistance', default=40, type=int, help='minimum distance of negative examples from positive ones')
     parser.add_option('-A', '--nmaxdistance', default=145, type=int, help='maximum distance of negative examples from positive ones')
-    parser.add_option('-b', '--base_scale', default=384.0, type=float, help='average lid distance in pixels in highest resolution')
     parser.add_option('-a', '--augument', dest='augument', action='store_true', default=False, help='Augument the dataset with mirrored and inverted examples.')
     parser.add_option('-C', '--C_parameter', default=5, type=float, help="C support vector parameter")
     options, args = parser.parse_args()
@@ -167,10 +166,10 @@ def main():
     clf = SVC(C=options.C_parameter, kernel='rbf')
     clf.fit(features_train, labels_train)
     
-    filename = 'svc_scale_%s_target_%s_components_%d_window_%d_mind_%d_maxnd_%d_nimages_%d_nnegative_%d_base_scale_%.1f_C_%.2f.pkl' % (options.scale, options.target, options.components, options.window, options.nmindistance, options.nmaxdistance, options.nimages, options.nnegative, options.base_scale, options.C_parameter)
+    filename = 'svc_scale_%s_target_%s_components_%d_window_%d_mind_%d_maxnd_%d_nimages_%d_nnegative_%d_C_%.2f.pkl' % (options.scale, options.target, options.components, options.window, options.nmindistance, options.nmaxdistance, options.nimages, options.nnegative, options.C_parameter)
     
     f = open(filename, 'w')
-    pickle.dump({'classifier': clf, 'feature_pca_extractor': pca}, f)
+    pickle.dump({'classifier': clf, 'feature_pca_extractor': pca, 'n_components': options.components, 'window': options.window}, f)
     f.close()
     
     print 'train score', clf.score(features_train, labels_train)

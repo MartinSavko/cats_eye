@@ -28,7 +28,7 @@ from skimage.util import view_as_windows
 from skimage import img_as_float 
 from skimage.transform import rescale
 
-from prepare_examples import unsharp_and_local_equalize
+from learner import unsharp_and_local_equalize
 
 import optparse
 import pickle
@@ -189,8 +189,13 @@ def get_lid_ideal_coordinates(max_distance=9):
 def get_scale_and_center_from_pin_positions(pin_positions):
     center = pin_positions.mean(axis=0)
     coordinates = pin_positions - center
+    
+    maximum = np.apply_along_axis(norm, 1, coordinates).max()
+    priemer = np.apply_along_axis(norm, 1, coordinates).mean()
+    minimum = np.apply_along_axis(norm, 1, coordinates).min()
     d = distance_matrix(coordinates, coordinates)
-    return d.max(), center
+    
+    return d.max(), maximum, priemer, minimum, center
     
 def rotate_and_scale_and_shift_ideal_pin_coordinates(angle, scale_factor, center):
     coordinates = get_pin_ideal_coordinates(max_distance=scale_factor)
@@ -205,15 +210,15 @@ def _predict(clf, feature, k, output):
     p = clf.predict(feature)
     output.put((k, p))
 
-def detect_pucks(image, puck_segment_size, step_size, classifier):
-    pw = view_as_windows(image, puck_segment_size, step_size)
+def detect_object(image, segment_size, step_size, classifier):
+    pw = view_as_windows(image, segment_size, step_size)
     original_shape = pw.shape
     pw = pw.reshape((pw.shape[0]*pw.shape[1], pw.shape[2]*pw.shape[3]))
-    t1 = time.time()
+    
     features = classifier['feature_pca_extractor'].transform(pw)
-    print 'features extraction took %6.4f seconds' % (time.time() - t1,)
     clf = classifier['classifier']
     n_cpu = cpu_count()
+    
     features_split = np.array_split(features, n_cpu)
     output = Queue()
     processes = []
@@ -231,13 +236,21 @@ def detect_pucks(image, puck_segment_size, step_size, classifier):
     for result in results:
         predict = np.hstack([predict, result[1]]) if predict.size else result[1]
   
-    print 'prediction took took %6.4f seconds' % (time.time() - t1,)
-    
     pm = predict.reshape(original_shape[:2])
     present = np.argwhere(pm==1) * step_size
     not_present = np.argwhere(pm==2) * step_size
     
     return present, not_present
+
+def get_subwindow(image, segment_location, segment_size):
+    location = tuple(map(int, segment_location))
+    c, r = location
+    before_y = int(c)
+    after_y = int(c + segment_size)
+    before_x = int(r)
+    after_x = int(r + segment_size)
+    subwindow = image[before_y: after_y, before_x: after_x]
+    return subwindow
 
 def get_lid_centers(puck_centers_shifted):
     lids_kmeans = KMeans(n_clusters=3)
@@ -275,16 +288,20 @@ def main():
     parser.add_option('-i', '--imagename', default='image.jpg', type=str, help='path to the image to search for objects in')
     parser.add_option('-s', '--detect_pins', action="store_true", dest="pins", default=False,  help='Detect pins')
     parser.add_option('-c', '--puck_window', default=119, type=int, help='puck detection window size')
-    parser.add_option('-n', '--pin_window', default=47, type=int, help='pin detection window size')
-    parser.add_option('-o', '--puck_step_size', default=4, type=int, help='puck detection stride')
-    parser.add_option('-d', '--pin_step_size', default=1, type=int, help='pin detection stride')
-    parser.add_option('-U', '--puck_classifier', default='svc_dewar_105_components.pkl', type=str, help='pickled puck classifier')
-    parser.add_option('-I', '--pin_classifier', default='svc_scale_dewar_target_pin_components_47_window_47_mind_7_maxnd_70_nimages_7_nnegative_500.pkl', type=str, help='pickled pin classifier')
+    parser.add_option('-n', '--pin_window', default=27, type=int, help='pin detection window size')
+    parser.add_option('-o', '--puck_step_size', default=7, type=int, help='puck detection stride')
+    parser.add_option('-d', '--pin_step_size', default=2, type=int, help='pin detection stride')
+    parser.add_option('-U', '--puck_classifier', default='puck_detector.pickle', type=str, help='pickled puck classifier')
+    parser.add_option('-I', '--pin_classifier', default='pin_detector.pickle', type=str, help='pickled pin classifier')
+    parser.add_option('-r', '--results_string', default='_detect5', type=str, help='results string')
     parser.add_option('-D', '--display', default=False, dest='display', action="store_true", help='Show results of detection')
+    parser.add_option('-m', '--images_info', default='images_info.pickle', type=str, help='Dictionary with training images information')
     
-    database = pickle.load(open('images_scales.pickle'))
     options, args = parser.parse_args()
+    
     print options.imagename
+    
+    database = pickle.load(open(options.images_info))
     if database[options.imagename]['scale'] == 'dewar':
         pass
     else:
@@ -298,38 +315,14 @@ def main():
         
     puck_classifier = pickle.load(open(options.puck_classifier))
     
-    present, not_present = detect_pucks(image, puck_segment_size, options.puck_step_size, puck_classifier)
+    present, not_present = detect_object(image, puck_segment_size, options.puck_step_size, puck_classifier)
     
     puck_centers = get_puck_centers(present, not_present)
-    
-    #print 'present'
-    #print present
-    
-    #print 'not_present'
-    #print not_present
-    
+      
     present_puck_indices, present_puck_locations, weights = determine_centers_corresponding_to_present_objects(puck_centers, present, not_present, distance=10)
-    
-    #print 'indices'
-    #print present_puck_indices
-    #print 'locations'
-    #print present_puck_locations
-    #print 
+  
     puck_centers_shifted = puck_centers + puck_segment_size/2
     
-      
-    #fig = plt.figure(figsize=(10, 8.2))
-    #ax = plt.subplot(1, 1, 1)
-    #ax.imshow(rgb_image)
-    
-    #color = 'blue'
-    #for coordinate in puck_centers_shifted:
-        #r, c = coordinate
-        #circ = plt.Circle((c, r), radius=45, edgecolor=color, lw=2, facecolor='none')
-        #ax.add_patch(circ)
-    
-    #plt.show()
-    #sys.exit(0)
     fig = plt.figure(figsize=(10, 8.2))
     ax = plt.subplot(1, 1, 1)
     ax.imshow(rgb_image)
@@ -376,79 +369,100 @@ def main():
             ax.annotate('%s(%d)' % (puck_local.replace('puck',''), puck_global), (c-puck_segment_size/9, r-average_lid_distance/7), color='w', fontsize=8)
             ax.add_patch(circ)
           
-    
     if options.pins == False:
         if options.display:
             plt.show()
         ax.set_title(options.imagename)
         ax.set_axis_off()
-        plt.savefig(options.imagename.replace('.jpg', '_detect4.jpg'), dpi='figure')
+        plt.savefig(options.imagename.replace('.jpg', '%s.jpg' % options.results_string), dpi='figure')
         sys.exit(0)
-    
-    
-    def detect_pins(image, segment_location, puck_segment_size, pin_segment_size, step_size, classifier):
-        location = tuple(map(int, segment_location))
-        print 'location', location
-        c, r = location
-        before_y = int(c)
-        after_y = int(c + puck_segment_size)
-        before_x = int(r)
-        after_x = int(r + puck_segment_size)
-        
-        subwindow = image[before_y: after_y, before_x: after_x]
-        print 'subwindow.shape', subwindow.shape
-        print 'pin_segment_size', pin_segment_size
-        print 'step_size', step_size
-        
-        pw = view_as_windows(subwindow, pin_segment_size, step_size)
-        original_shape = pw.shape
-        pw = pw.reshape((pw.shape[0]*pw.shape[1], pw.shape[2]*pw.shape[3]))
-        print 'pw.shape', pw.shape
-        t1 = time.time()
-        
-        features = classifier['feature_pca_extractor'].transform(pw)
-        print 'features extraction took %6.4f seconds' % (time.time() - t1,)
-        
-        clf = classifier['classifier']
-        n_cpu = cpu_count()
-        features_split = np.array_split(features, n_cpu)
-        output = Queue()
-        processes = []
-
-        for k, feature in enumerate(features_split):
-            processes.append(Process(target=_predict, args=(clf, feature, k, output)))
-        for p in processes:
-            p.start()
-        for p in processes:
-            p.join()
-
-        results = [output.get() for p in processes]
-        results.sort(key=lambda x: x[0])
-        predict = np.array([])
-        for result in results:
-            predict = np.hstack([predict, result[1]]) if predict.size else result[1]
-    
-        print 'prediction took took %6.4f seconds' % (time.time() - t1,)
-        
-        pm = predict.reshape(original_shape[:2])
-        
-        pin_present = np.argwhere(pm==1) * step_size + np.array([c, r])
-        pin_missing = np.argwhere(pm==2) * step_size + np.array([c, r])
-        
-        return pin_present, pin_missing
     
     crop_size = average_lid_distance/3.
     pin_classifier = pickle.load(open(options.pin_classifier))
     
     all_present_pins = np.array([])
     all_missing_pins = np.array([])
+    pin_indices = np.array([])
+    pin_labels = np.array([])
+    pin_presence_flags =[]
+    pin_absence_flags = []
     
+    kmeans_pin_indices = KMeans(n_clusters=16)
+    print 'average_lid_distance', average_lid_distance
     for k, location in enumerate(present_puck_locations):
         location = tuple(map(int, location))
-        pin_present, pin_missing = detect_pins(image, location, options.puck_window, options.pin_window, options.pin_step_size, pin_classifier)
+
+        puck_label = present_puck_order_vs_location[location]
+
+        subwindow = get_subwindow(image, location, options.puck_window)
+        pin_present, pin_missing = detect_object(subwindow, options.pin_window, options.pin_step_size, pin_classifier)
+        
+        pin_present += np.array(location)
+        pin_missing += np.array(location)
+        
         all_present_pins = np.vstack([all_present_pins, pin_present]) if all_present_pins.size else pin_present
         all_missing_pins = np.vstack([all_missing_pins, pin_missing]) if all_missing_pins.size else pin_missing
-    
+
+        pin_locations = np.vstack((pin_present, pin_missing))
+        
+        pin_kmeans = KMeans(n_clusters=16)
+        pin_kmeans.fit(pin_locations)
+        pin_centers = pin_kmeans.cluster_centers_
+        
+        scale, maximum, priemer, minimum, center = get_scale_and_center_from_pin_positions(pin_centers)
+        
+        if options.display:
+            print 'scale', scale
+            print 'priemer', priemer
+            print 'maximum', maximum
+            print 'minimum', minimum
+            print 'center', center
+            print 'lid distance vs. pin distance', average_lid_distance/scale
+        
+        distances = np.apply_along_axis(norm, 1, pin_locations - center)
+        pin_locations = pin_locations[distances/priemer < 1.4]
+        distances = np.apply_along_axis(norm, 1, pin_locations - center)
+        pin_locations = pin_locations[0.4 < distances/priemer]
+        
+        pin_kmeans.fit(pin_locations)
+        pin_centers = pin_kmeans.cluster_centers_
+        
+        scale, maximum, priemer, minimum, center = get_scale_and_center_from_pin_positions(pin_centers)
+        
+        rotated_and_scaled = rotate_and_scale_and_shift_ideal_pin_coordinates(puck_angles[puck_label], scale, center)
+        
+        kmeans_pin_indices.cluster_centers_ = rotated_and_scaled
+                
+        predicted_pin_indices = kmeans_pin_indices.predict(pin_centers) + 1
+        
+        if options.display:
+            print 'scale', scale
+            print 'priemer', priemer
+            print 'maximum', maximum
+            print 'minimum', minimum
+            print 'center', center
+            print 'lid distance vs. pin distance', average_lid_distance/scale
+            print
+        
+        pin_labels = np.vstack([pin_labels, predicted_pin_indices]) if pin_indices.size else predicted_pin_indices
+        pin_indices = np.vstack([pin_indices, pin_centers]) if pin_indices.size else pin_centers
+        #pin_indices = np.vstack([pin_indices, kmeans_pin_indices.cluster_centers_]) if pin_indices.size else pin_centers
+        
+        present_pin_indices, present_pin_locations, weights = determine_centers_corresponding_to_present_objects(pin_centers, pin_present, pin_missing, distance=4)
+        ppf = np.zeros(len(pin_centers))
+        ppf[present_pin_indices] = weights
+        ppf = list(ppf)
+        pin_presence_flags += ppf
+        
+        absent_pin_indices, absent_pin_locations, weights = determine_centers_corresponding_to_present_objects(pin_centers, pin_missing, pin_present, distance=4)
+        paf = np.zeros(len(pin_centers))
+        paf[absent_pin_indices] = weights
+        paf = list(paf)
+        pin_absence_flags += paf
+        
+    pin_presence_flags = np.array(pin_presence_flags)
+    pin_absence_flags = np.array(pin_absence_flags)
+    pin_info = np.hstack((pin_indices, pin_labels.reshape((pin_labels.size, 1)), pin_presence_flags.reshape((pin_presence_flags.size,1)), pin_absence_flags.reshape((pin_absence_flags.size,1)) ))
     
     for k, coordinate in enumerate(all_present_pins):
         edgecolor = 'green'
@@ -466,182 +480,30 @@ def main():
         rect = plt.Rectangle((c, r), options.pin_window/10, options.pin_window/10, edgecolor=edgecolor, facecolor='none')
         ax.add_patch(rect)
     
+    for k, coordinate_label in enumerate(pin_info):
+        r, c, label, present, absent = coordinate_label
+        r += options.pin_window/4.
+        c += options.pin_window/4.
+        if present >= 1 and absent == 0:
+            edgecolor = 'green'
+        elif present == 0 and absent >= 1:
+            edgecolor = 'red'
+        elif present > absent:
+            edgecolor = 'green'
+        elif present < absent:
+            edgecolor = 'red'
+        else:
+            edgecolor = 'orange'
+        rect = plt.Rectangle((c, r), options.pin_window/2, options.pin_window/2, edgecolor=edgecolor, facecolor='none')
+        ax.annotate('%d' % label, (c, r))
+        ax.add_patch(rect)
+        
     ax.set_title(options.imagename)
     ax.set_axis_off()
-    plt.savefig(options.imagename.replace('.jpg', '_detect4.jpg'), dpi='figure')
+    plt.savefig(options.imagename.replace('.jpg', '%s.jpg' % options.results_string), dpi='figure')
     if options.display:
         plt.show()
-    
-    #for k, coordinate_label in enumerate(pin_info):
-        #r, c, label, present, absent = coordinate_label
-        #r += options.pin_window/4.
-        #c += options.pin_window/4.
-        #if present >= 1 and absent == 0:
-            #edgecolor = 'green'
-        #elif present == 0 and absent >= 1:
-            #edgecolor = 'red'
-        #elif present > absent:
-            #edgecolor = 'green'
-        #elif present < absent:
-            #edgecolor = 'red'
-        #else:
-            #edgecolor = 'orange'
-        #rect = plt.Rectangle((c, r), options.pin_window/2, options.pin_window/2, edgecolor=edgecolor, facecolor='none')
-        #ax.annotate('%d' % label, (c, r))
-        #ax.add_patch(rect)
         
-        #pin_locations = np.vstack((pin_indices_missing, pin_indices_present))
-        
-        #pin_kmeans = KMeans(n_clusters=16)
-        #pin_kmeans.fit(pin_locations)
-        #pin_centers = pin_kmeans.cluster_centers_
-        #pin_indices += list(pin_centers)
-        
-        #print 'scale from pin positions'
-        #scale, center = get_scale_and_center_from_pin_positions(pin_centers)
-        #print scale
-        #print 'center of puck'
-        #print center
-        #print 'puck angle puck nr %d' % puck_label, puck_angles[puck_label]
-        #rotated_and_scaled = rotate_and_scale_and_shift_ideal_pin_coordinates(puck_angles[puck_label], scale, center)
-        #print 'rotated_and_scaled'
-        #print rotated_and_scaled
-        #print 'pin_centers'
-        #print pin_centers
-        
-        #kmeans_pin_indices = KMeans(n_clusters=16)
-        #kmeans_pin_indices.cluster_centers_ = rotated_and_scaled
-        #predicted_pin_indices = kmeans_pin_indices.predict(pin_centers) + 1
-        #print 'predicted_pin_indices'
-        #print predicted_pin_indices
-        #pin_labels += list(predicted_pin_indices)
-        
-        #present_pin_indices, present_pin_locations, weights = determine_centers_corresponding_to_present_objects(pin_centers, pin_indices_present, distance=4)
-        #ppf = np.zeros(len(pin_centers))
-        #ppf[present_pin_indices] = weights
-        #ppf = list(ppf)
-        #pin_presence_flags += ppf
-        
-        #absent_pin_indices, absent_pin_locations, weights = determine_centers_corresponding_to_present_objects(pin_centers, pin_indices_missing, distance=4)
-        #paf = np.zeros(len(pin_centers))
-        #paf[absent_pin_indices] = weights
-        #paf = list(paf)
-        #pin_absence_flags += paf
-        
-        #present = np.argwhere(pm==1) * step_size
-        #not_present = np.argwhere(pm==2) * step_size
-        
-        #indices = np.vstack((present, not_present))
-        
-        #if len(indices) > 9:
-            #n_clusters = 9
-        #else:
-            #n_clusters = len(indices)
-        
-        #puck_kmeans = KMeans(n_clusters=n_clusters)
-        #puck_kmeans.fit(indices)
-            
-        #puck_centers = puck_kmeans.cluster_centers_
-        
-        #present_puck_indices, present_puck_locations, weights = determine_centers_corresponding_to_present_objects(puck_centers, present, distance=10)
-        
-        #return puck_centers, present_puck_locations
-    
-    
-    #pin_indices = []
-    #pin_labels = []
-    #pin_presence_flags = []
-    #pin_absence_flags = []
-    
-    #kmeans_pin_indices = KMeans(n_clusters=16)
-    #for k, location in enumerate(present_puck_locations):
-        #location = tuple(map(int, location))
-        #puck_label = present_puck_order_vs_location[location]
-        
-        #c, r = location
-        #subwindow = image[c: c+155, r: r+155]
-        
-        #pw = view_as_windows(subwindow, options.pin_window, options.pin_step_size)
-        #original_shape = pw.shape
-        #pw = pw.reshape((pw.shape[0]*pw.shape[1], pw.shape[2]*pw.shape[3]))
-        #try:
-            #pin_indices_missing = pickle.load(open('temp/pin_indices_missing_%d.pkl' % k))
-        #except:
-            #t0 = time.time()
-            #missing = pickle.load(open('svc_missing_pins_equalized_dewar_positive_35_components.pkl'))
-            #missing_features = missing['feature_pca_extractor'].transform(pw)
-            #predict_missing = missing['classifier'].predict(missing_features)
-            #print 'missing pins search took %6.4f seconds' % (time.time() - t0)
-            #pm = predict_missing.reshape((original_shape[0], original_shape[1]))
-
-            #pin_indices_missing = np.argwhere(pm==1) * options.pin_step_size + np.array([c, r])
-            
-            ##f = open('temp/pin_indices_missing_%d.pklP' % k, 'w')
-            ##pickle.dump(pin_indices_missing, f)
-            ##f.close()
-        #try: 
-            #pin_indices_present = pickle.load(open('temp/pin_indices_present_%d.pkl' % k))
-        #except:
-            #t1 = time.time()
-            #present = pickle.load(open('svc_present_pins_equalized_dewar_positives_25_components.pkl'))
-            #present_features = present['feature_pca_extractor'].transform(pw)
-            #predict_missing = present['classifier'].predict(present_features)
-            #print 'present pins search took %6.4f seconds' % (time.time() - t1)
-            #pp = predict_missing.reshape((original_shape[0], original_shape[1])) 
-            
-            #pin_indices_present = np.argwhere(pp==1) * options.pin_step_size + np.array([c, r])
-        
-            ##f = open('temp/pin_indices_present_%d.pklP' % k, 'w')
-            ##pickle.dump(pin_indices_present, f)
-            ##f.close()
-        
-        ## We use clustering to solve problem with multiple detection
-        #pin_locations = np.vstack((pin_indices_missing, pin_indices_present))
-        #pin_kmeans = KMeans(n_clusters=16)
-        #pin_kmeans.fit(pin_locations)
-        #pin_centers = pin_kmeans.cluster_centers_
-        #pin_indices += list(pin_centers)
-        
-        ##new_pin_puck_labels = puck_kmeans.predict(pin_centers)
-        #print 'scale from pin positions'
-        #scale, center = get_scale_and_center_from_pin_positions(pin_centers)
-        #print scale
-        #print 'center of puck'
-        #print center
-        #print 'puck angle puck nr %d' % puck_label, puck_angles[puck_label]
-        #rotated_and_scaled = rotate_and_scale_and_shift_ideal_pin_coordinates(puck_angles[puck_label], scale, center)
-        #print 'rotated_and_scaled'
-        #print rotated_and_scaled
-        #print 'pin_centers'
-        #print pin_centers
-        
-        #kmeans_pin_indices.cluster_centers_ = rotated_and_scaled
-        #predicted_pin_indices = kmeans_pin_indices.predict(pin_centers) + 1
-        #print 'predicted_pin_indices'
-        #print predicted_pin_indices
-        #pin_labels += list(predicted_pin_indices)
-                           
-        #present_pin_indices, present_pin_locations, weights = determine_centers_corresponding_to_present_objects(pin_centers, pin_indices_present, distance=4)
-        #ppf = np.zeros(len(pin_centers))
-        #ppf[present_pin_indices] = weights
-        #ppf = list(ppf)
-        #pin_presence_flags += ppf
-        
-        #absent_pin_indices, absent_pin_locations, weights = determine_centers_corresponding_to_present_objects(pin_centers, pin_indices_missing, distance=4)
-        #paf = np.zeros(len(pin_centers))
-        #paf[absent_pin_indices] = weights
-        #paf = list(paf)
-        #pin_absence_flags += paf
-        
-    #pin_indices = np.array(pin_indices)
-    #pin_labels = np.array(pin_labels)
-    #pin_presence_flags = np.array(pin_presence_flags)
-    #pin_absence_flags = np.array(pin_absence_flags)
-    #print 'pin_indices', len(pin_indices)
-    #pin_info = np.hstack((pin_indices, pin_labels.reshape((pin_labels.size, 1)), pin_presence_flags.reshape((pin_presence_flags.size,1)), pin_absence_flags.reshape((pin_absence_flags.size,1)) ))
-    
-
-
 if __name__ == '__main__':
     main()
     

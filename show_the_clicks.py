@@ -100,7 +100,7 @@ def main():
     import pickle
     
     parser = optparse.OptionParser()
-    parser.add_option('-d', '--database', default='images_scales.pickle', help='pickled dictionary with image filenames and corresponding information about scale and keypoints (click coordinates)')
+    parser.add_option('-d', '--database', default='images_info.pickle', help='pickled dictionary with image filenames and corresponding information about scale and keypoints (click coordinates)')
     parser.add_option('-f', '--filename', default='./experimental_images/2017-05-27/12_05_19/2017-05-27_12:05:19_pan-17.4724_tilt-87.0000_zoom5800_merged.jpg', type=str, help='image to examine')
     options, args = parser.parse_args()
 
